@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.bak*
+*.orig
+.venv/
+# 运行时配置与数据不入库（含 Cookie）
+config/
+cache/
+data/
+*.log
