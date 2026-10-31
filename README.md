@@ -13,13 +13,15 @@ B站（视频、图文、直播间）、抖音（视频、图文、直播间）�
 ```
 __init__.py                  NoneBot2 插件入口（on_message，后台任务处理）
 astrbot_shim.py              兼容层：模拟原插件用到的 AstrBot 接口（消息组件、事件、Context、logger、数据目录）
-astrbot_plugin_media_parser/ 原插件代码（含本地改动）
+media-resolver/              原插件代码（含本地改动）
 ```
+
+`media-resolver` 目录名含连字符，入口用 `importlib.import_module(".media-resolver.main", __name__)` 加载；插件内部全是相对导入。插件注册名仍为 `astrbot_plugin_media_parser`（决定数据目录 `plugin_data/astrbot_plugin_media_parser/`），改名时不要动它，否则缓存、解析记录和 B站登录凭证会换目录。
 
 ## 部署
 
 1. 放到 NoneBot 项目的插件目录，例如 `plugins/media_parser/`。
-2. 依赖：`nonebot2`、`nonebot-adapter-onebot`、以及 `astrbot_plugin_media_parser/requirements.txt`（aiohttp、cryptography、qrcode、pillow）；系统需要 `ffmpeg`。
+2. 依赖：`nonebot2`、`nonebot-adapter-onebot`、以及 `media-resolver/requirements.txt`（aiohttp、cryptography、qrcode、pillow）；系统需要 `ffmpeg`。
 3. NoneBot `.env` 中配置：
    - `MEDIA_PARSER_CONFIG`：解析配置 JSON 路径（键名与原插件 `_conf_schema.json` 一致，含各平台 Cookie，**不要提交到仓库**）。
    - `MEDIA_PARSER_DATA_DIR`：缓存目录。媒体以 `file://` 本地路径发给 OneBot 实现，该目录必须对 OneBot 端同路径可见（容器部署时需同路径挂载）。
@@ -42,4 +44,4 @@ astrbot_plugin_media_parser/ 原插件代码（含本地改动）
 
 ## 许可
 
-原插件以 **AGPL-3.0** 发布，本仓库沿用（见 `LICENSE`、`astrbot_plugin_media_parser/LICENSE`）；其中部分组件另有许可，见 `astrbot_plugin_media_parser/LICENSES/`。卡片渲染器移植自 astrbot_plugin_rika_share（MIT）。
+原插件以 **AGPL-3.0** 发布，本仓库沿用（见 `LICENSE`、`media-resolver/LICENSE`）；其中部分组件另有许可，见 `media-resolver/LICENSES/`。卡片渲染器移植自 astrbot_plugin_rika_share（MIT）。

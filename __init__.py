@@ -1,11 +1,12 @@
 """娅娅视频解析：astrbot_plugin_media_parser 7.0.1（含 2026-10 本地补丁）在 NoneBot2 下的入口。
 
-插件代码原样放在 astrbot_plugin_media_parser/，通过 astrbot_shim 提供所需的 AstrBot 接口。
+插件代码放在 media-resolver/，通过 astrbot_shim 提供所需的 AstrBot 接口。
 配置沿用 AstrBot 版 JSON（MEDIA_PARSER_CONFIG）；缓存位于 MEDIA_PARSER_DATA_DIR 下，
 该目录需对 SnowLuma 容器同路径可见，媒体以 file:// 本地路径发送。
 """
 
 import asyncio
+import importlib
 
 from nonebot import get_driver, get_plugin_config, logger, on_message
 from nonebot.adapters.onebot.v11 import Bot, MessageEvent
@@ -30,10 +31,11 @@ __plugin_meta__ = PluginMetadata(
 cfg = get_plugin_config(Config)
 astrbot_shim.install(cfg.media_parser_data_dir)
 
-from .astrbot_plugin_media_parser.main import VideoParserPlugin  # noqa: E402
+# 目录名含连字符，不能写成 import 语句；插件内部都是相对导入，不受影响
+VideoParserPlugin = importlib.import_module(".media-resolver.main", __name__).VideoParserPlugin
 
 driver = get_driver()
-_plugin: VideoParserPlugin | None = None
+_plugin = None
 _tasks: set[asyncio.Task] = set()
 
 

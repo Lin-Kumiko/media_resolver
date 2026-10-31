@@ -1,6 +1,6 @@
 """AstrBot 接口的最小兼容层。
 
-只实现 astrbot_plugin_media_parser 实际用到的部分（消息组件、事件、Context、
+只实现 media-resolver（原 astrbot_plugin_media_parser）实际用到的部分（消息组件、事件、Context、
 logger、数据目录），让插件代码在 NoneBot2 + OneBot V11 下原样运行。
 """
 
