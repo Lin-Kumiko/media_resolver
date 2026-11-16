@@ -97,7 +97,11 @@ _STAT_LABELS = {
 
 
 # 卡片样式版本：视觉样式变化时 +1，使已缓存的旧卡片失效并重新渲染
-_CARD_STYLE_VERSION = "12-whale"
+_CARD_STYLE_VERSION = "13-whale"
+
+# [local patch] 话题 / @提及：信息流布局里用品牌色标出
+_TAG_STOP = r"\s#@，。！？、；：,.!?;:（）()\[\]【】《》<>\"'“”‘’"
+_TAG_RE = re.compile(rf"#[^{_TAG_STOP}]{{1,30}}#?|@[^{_TAG_STOP}]{{1,30}}")
 
 
 def strip_emoji(text: str | None) -> str:
@@ -145,7 +149,8 @@ def short_url(url: str | None, max_len: int = 58) -> str:
     """去掉协议头并截断为适合卡片展示的链接文本。"""
     if not url:
         return ""
-    text = re.sub(r"^https?://", "", url).rstrip("/")
+    text = re.sub(r"^https?://", "", url)
+    text = re.sub(r"[?#].*$", "", text).rstrip("/")  # [local patch] 去掉跟踪参数
     if len(text) > max_len:
         text = text[: max_len - 1] + "…"
     return text
@@ -171,9 +176,23 @@ def format_timestamp(ts: int | None) -> str | None:
     if ts is None:
         return None
     try:
-        return datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+        dt = datetime.fromtimestamp(ts)
     except (OverflowError, OSError, ValueError):
         return None
+    # [local patch] 往年的内容带上年份，避免把旧帖看成今年的
+    if dt.year != datetime.now().year:
+        return dt.strftime("%Y-%m-%d")
+    return dt.strftime("%m-%d %H:%M")
+
+
+def fmt_clock(duration: float) -> str:
+    """封面角标用的时长：1:12 / 3:07:14。"""
+    total = max(int(duration), 0)
+    hours, rest = divmod(total, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
 
 
 # ============================ 视觉参数表 ============================
@@ -568,6 +587,85 @@ class ShareCardRenderer:
     def _line_height(self, font: Any) -> int:
         ascent, descent = font.getmetrics()
         return ascent + descent
+
+    # ---------- [local patch] 带话题高亮的多行文本 ----------
+
+    PARA_GAP = 14  # 空行（段落间隔）占的高度，比一整行矮
+
+    def _rich_lines(
+        self, text: str, font: Any, max_width: int, max_lines: int
+    ) -> list[list[tuple[str, bool]]]:
+        """换行并标出 #话题 / @提及。
+
+        返回每行的 [(片段, 是否高亮), ...]；空列表表示段落间隔。
+        高亮范围在换行前按整段文本计算，话题被折行时两半都保持高亮。
+        """
+        flags = [False] * len(text)
+        for m in _TAG_RE.finditer(text):
+            for i in range(m.start(), m.end()):
+                flags[i] = True
+
+        lines: list[tuple[str, int]] = []
+        pos = 0
+        for raw in text.split("\n"):
+            if not raw.strip():
+                if lines and lines[-1][0]:
+                    lines.append(("", pos))
+            else:
+                current, start = "", pos
+                for i, ch in enumerate(raw):
+                    if not current or self._text_width(current + ch, font) <= max_width:
+                        current += ch
+                    else:
+                        lines.append((current, start))
+                        current, start = ch, pos + i
+                lines.append((current, start))
+            pos += len(raw) + 1
+        while lines and not lines[-1][0]:
+            lines.pop()
+
+        truncated = len(lines) > max_lines
+        lines = lines[:max_lines]
+        while lines and not lines[-1][0]:
+            lines.pop()
+
+        out: list[list[tuple[str, bool]]] = []
+        for idx, (line, start) in enumerate(lines):
+            runs: list[tuple[str, bool]] = []
+            if truncated and idx == len(lines) - 1:
+                while line and self._text_width(line + "…", font) > max_width:
+                    line = line[:-1]
+            for i, ch in enumerate(line):
+                flag = flags[start + i]
+                if runs and runs[-1][1] == flag:
+                    runs[-1] = (runs[-1][0] + ch, flag)
+                else:
+                    runs.append((ch, flag))
+            if truncated and idx == len(lines) - 1:
+                runs.append(("…", False))
+            out.append(runs)
+        return out
+
+    def _rich_height(self, lines: list, line_h: int) -> int:
+        return sum(line_h if runs else self.PARA_GAP for runs in lines)
+
+    def _draw_rich(
+        self, draw: Any, x: int, y: int, lines: list, size: int, line_h: int,
+        fill: Any, tag_fill: Any, bold: bool = False,
+    ) -> int:
+        """绘制 _rich_lines 的结果，返回结束 y。"""
+        font = self._font(size, bold)
+        for runs in lines:
+            if not runs:
+                y += self.PARA_GAP
+                continue
+            cx = float(x)
+            for seg, is_tag in runs:
+                self._draw_text(draw, (round(cx), y), seg, size,
+                                tag_fill if is_tag else fill, bold=bold)
+                cx += self._measure.textlength(seg, font=font)
+            y += line_h
+        return y
 
     def _draw_text(
         self,
@@ -1487,8 +1585,11 @@ class ShareCardRenderer:
         if url_text:
             url_font = self._font(_L.F_FOOT)
             avail_w = wm_x - pad - 20
-            while url_text and self._text_width(url_text, url_font) > avail_w:
-                url_text = url_text[:-1]
+            if self._text_width(url_text, url_font) > avail_w:  # [local patch] 截断时补省略号
+                url_text = url_text.rstrip("…")
+                while url_text and self._text_width(url_text + "…", url_font) > avail_w:
+                    url_text = url_text[:-1]
+                url_text = url_text + "…" if url_text else ""
             if url_text:
                 self._draw_text(
                     draw, (pad, foot_y), url_text, _L.F_FOOT, theme.text_tertiary
@@ -1786,6 +1887,98 @@ class ShareCardRenderer:
             y += _L.STAT_H + _L.STAT_ROW_GAP
         return y - _L.STAT_ROW_GAP
 
+    # ---------- [local patch] 信息流布局：无底色的统计行 ----------
+
+    STRIP_H = 30
+    STRIP_ICON = 21
+    STRIP_ICON_GAP = 7
+    STRIP_GAP_MAX = 34
+    STRIP_GAP_MIN = 18
+    STRIP_ROW_GAP = 14
+    F_STRIP = 20
+
+    def _strip_item_width(self, label: str, value: str) -> int:
+        value_font = self._font(self.F_STRIP, bold=True)
+        if value and label in self._STAT_ICON_KINDS:
+            return self.STRIP_ICON + self.STRIP_ICON_GAP + self._text_width(value, value_font)
+        w = self._text_width(label, self._font(self.F_STRIP))
+        if value:
+            w += 6 + self._text_width(value, value_font)
+        return w
+
+    def _stat_strip_layout(self, stats: list[tuple[str, str]], inner_w: int):
+        """返回 (总高度, [[(label, value, x偏移), ...], ...])。
+
+        一行放得下就左对齐、间距随数量收紧；放不下就拆成等宽列的多行，上下对齐。
+        """
+        if not stats:
+            return 0, []
+        widths = [self._strip_item_width(label, value) for label, value in stats]
+        n = len(stats)
+        rows: list[list[tuple[str, str, int]]] = []
+        if n == 1 or sum(widths) + (n - 1) * self.STRIP_GAP_MIN <= inner_w:
+            gap = self.STRIP_GAP_MAX
+            if n > 1:
+                gap = min(gap, (inner_w - sum(widths)) // (n - 1))
+            x, row = 0, []
+            for (label, value), w in zip(stats, widths):
+                row.append((label, value, x))
+                x += w + gap
+            rows.append(row)
+        else:
+            per = n
+            for k in range(2, n + 1):
+                per = math.ceil(n / k)
+                if max(widths) + self.STRIP_GAP_MIN <= inner_w // per:
+                    break
+            col_w = inner_w // per
+            for i in range(0, n, per):
+                rows.append([(label, value, j * col_w)
+                             for j, (label, value) in enumerate(stats[i:i + per])])
+        height = len(rows) * self.STRIP_H + (len(rows) - 1) * self.STRIP_ROW_GAP
+        return height, rows
+
+    def _draw_stat_strip(self, canvas, theme: _Theme, rows, x0: int, y: int) -> int:
+        """绘制统计行，返回结束 y。"""
+        label_font = self._font(self.F_STRIP)
+        value_font = self._font(self.F_STRIP, bold=True)
+        text_dy = (self.STRIP_H - self._line_height(value_font)) // 2
+        for row in rows:
+            for label, value, dx in row:
+                x = x0 + dx
+                kind = self._STAT_ICON_KINDS.get(label)
+                if value and kind:
+                    icon = self._stat_icon(kind, self.STRIP_ICON, theme.text_tertiary)
+                    canvas.alpha_composite(icon, (x, y + (self.STRIP_H - self.STRIP_ICON) // 2))
+                    self._draw_text(ImageDraw.Draw(canvas),
+                                    (x + self.STRIP_ICON + self.STRIP_ICON_GAP, y + text_dy),
+                                    value, self.F_STRIP, theme.text_secondary, bold=True)
+                else:
+                    draw = ImageDraw.Draw(canvas)
+                    self._draw_text(draw, (x, y + text_dy), label, self.F_STRIP,
+                                    theme.text_tertiary)
+                    if value:
+                        self._draw_text(
+                            draw, (x + self._text_width(label, label_font) + 6, y + text_dy),
+                            value, self.F_STRIP, theme.text_secondary, bold=True)
+            y += self.STRIP_H + self.STRIP_ROW_GAP
+        return y - self.STRIP_ROW_GAP
+
+    def _soft_shadow(self, canvas, x: int, y: int, w: int, h: int, radius: int) -> None:
+        """媒体块下方的柔和投影（让封面从底色上浮起来）。"""
+        alpha = 46 if self.theme_name == "light" else 110
+        m = 28
+        layer = Image.new("RGBA", (w + m * 2, h + m * 2), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).rounded_rectangle(
+            (m + 6, m + 12, m + w - 7, m + h + 3), radius=radius, fill=(18, 28, 56, alpha)
+        )
+        layer = layer.filter(ImageFilter.GaussianBlur(11))
+        # 画布底部留给卡片自身的投影，超出部分裁掉
+        box = (0, 0, min(layer.size[0], canvas.size[0] - (x - m)),
+               min(layer.size[1], canvas.size[1] - (y - m)))
+        if box[2] > 0 and box[3] > 0:
+            canvas.alpha_composite(layer.crop(box), (x - m, y - m))
+
     def _draw_online(self, draw, d: dict, y: int, accent: str) -> int:
         """在线人数（accent 圆点 + 文字），返回结束 y。"""
         online_font = self._font(_L.F_ONLINE)
@@ -1928,8 +2121,11 @@ class ShareCardRenderer:
         if url_text:
             url_font = self._font(_L.F_FOOT)
             avail_w = wm_x - pad - 20
-            while url_text and self._text_width(url_text, url_font) > avail_w:
-                url_text = url_text[:-1]
+            if self._text_width(url_text, url_font) > avail_w:  # [local patch] 截断时补省略号
+                url_text = url_text.rstrip("…")
+                while url_text and self._text_width(url_text + "…", url_font) > avail_w:
+                    url_text = url_text[:-1]
+                url_text = url_text + "…" if url_text else ""
             if url_text:
                 color = (255, 255, 255, 160) if on_image else theme.text_tertiary
                 self._draw_text(draw, (pad, foot_y), url_text, _L.F_FOOT, color)
@@ -2271,7 +2467,11 @@ class ShareCardRenderer:
     # ==================== 布局：社交动态流 ====================
 
     def _render_feed(self, result, images, out_path) -> Path:
-        """社交动态：作者行最前，媒体为内嵌圆角块。"""
+        """社交动态：作者行最前，媒体为内嵌圆角块。
+
+        [local patch] 版式重排：作者名下方放时间、平台徽章靠右；话题高亮；
+        视频时长做成封面角标；统计项改为无底色的一行。
+        """
         theme = _THEMES[self.theme_name]
         accent = PLATFORM_COLORS.get(result.platform.name, PLATFORM_COLORS["default"])
         accent_rgb = _hex_to_rgb(accent)
@@ -2279,33 +2479,54 @@ class ShareCardRenderer:
         inner_w = self.width - pad * 2
         gap = _L.GRID_GAP
         d = self._prep(result, images)
+        brand_rgb = _hex_to_rgb(BRAND_ACCENT)
+        tag_rgb = brand_rgb if self.theme_name == "light" else _mix(brand_rgb, (255, 255, 255), 0.45)
 
-        title_font = self._font(34, bold=True)
-        title_lines = self._fit_lines(d["title"], title_font, inner_w, 3) if d["title"] else []
+        AV = 68
+        TITLE_SIZE, TITLE_LH = 34, 48
+        MEDIA_RADIUS = 20
+
+        title_font = self._font(TITLE_SIZE, bold=True)
+        title_lines = self._rich_lines(d["title"], title_font, inner_w, 3) if d["title"] else []
         desc_font = self._font(_L.F_DESC)
-        desc_lines = self._fit_lines(d["text"], desc_font, inner_w, 5) if d["text"] else []
+        desc_lines = self._rich_lines(d["text"], desc_font, inner_w, 6) if d["text"] else []
+        title_h = self._rich_height(title_lines, TITLE_LH)
+        desc_h = self._rich_height(desc_lines, _L.F_DESC_LINE_H)
+
         media_h = round(inner_w * 9 / 16) if d["hero"] else 0
         if d["hero"] and self.cover_full_size:
             media_h = self._hero_aspect_height(d["hero"], inner_w, media_h)
-        stats_h, stat_rows = self._stat_rows_height(d, inner_w)
+
+        # 视频时长放到封面右下角，不再占一个统计位
+        clock = ""
+        duration = result.extra.get("duration")
+        if d["is_video_hero"] and duration:
+            clock = fmt_clock(duration)
+            d["stats"] = [s for s in d["stats"] if not s[0].startswith("时长")]
+        # 播放 / 浏览量排最前
+        d["stats"].sort(key=lambda s: 0 if s[0] in ("播放", "浏览") else 1)
+
+        stats_h, stat_rows = self._stat_strip_layout(d["stats"], inner_w)
         warnings_h = self._warning_block_height(d["warnings"], inner_w)
         grid_h = self._grid_metrics(len(d["grid"]), inner_w, gap)[0]
         quote_h = self._measure_quote(result.repost, inner_w) if result.repost else 0
-        brand_rgb = _hex_to_rgb(BRAND_ACCENT)  # [local patch]
 
         # ---- 高度 ----
         y = 38
         if d["author"]:
-            y += 68 + 20
-        y += len(title_lines) * 48 + (12 if title_lines else 0)
+            y += AV + 22
+        if title_lines:
+            y += title_h + 6
         if desc_lines:
-            y += len(desc_lines) * _L.F_DESC_LINE_H + 16
+            y += desc_h
+        if title_lines or desc_lines:
+            y += 12
         if media_h:
-            y += media_h + 20
+            y += media_h + 22
         if stats_h:
-            y += stats_h + 18
+            y += stats_h + 16
         if d["online_text"]:
-            y += 38
+            y += 38 + 8
         if warnings_h:
             y += warnings_h + 20
         if grid_h:
@@ -2317,66 +2538,79 @@ class ShareCardRenderer:
 
         canvas, draw = self._base_canvas(theme, brand_rgb, card_h)
 
-        # 作者行最前（无顶部 accent 条/头部徽章）
+        # ---- 作者行：头像 | 昵称 / 时间 | 平台徽章 ----
         y = 38
         if d["author"]:
-            self._avatar_block(canvas, draw, pad, y, 68, images, d, accent_rgb)
-            draw = ImageDraw.Draw(canvas)
-            name_x = pad + 68 + 20
-            name_font = self._font(26, bold=True)
-            name_w = self._text_width(d["name"], name_font)
-            self._draw_text(draw, (name_x, y + 8), d["name"], 26, theme.text_primary, bold=True)
-            # 平台小药丸跟在昵称后
-            pill_font = self._font(17, bold=True)
-            pill_w = 12 + 8 + 6 + self._text_width(d["platform_text"], pill_font) + 12
-            pill_h = 30
-            pill_y = y + 8 + (self._line_height(name_font) - pill_h) // 2
-            self._glass(canvas, (name_x + name_w + 12, pill_y,
-                                 name_x + name_w + 12 + pill_w, pill_y + pill_h),
+            self._avatar_block(canvas, draw, pad, y, AV, images, d, accent_rgb)
+
+            pill_font = self._font(18, bold=True)
+            pill_h = 34
+            pill_w = 16 + 10 + 8 + self._text_width(d["platform_text"], pill_font) + 16
+            pill_x = self.width - pad - pill_w
+            pill_y = y + (AV - pill_h) // 2
+            self._glass(canvas, (pill_x, pill_y, pill_x + pill_w, pill_y + pill_h),
                         pill_h // 2, theme.pill_bg, theme.frost_alpha,
                         theme.pill_bg, theme.frost_border_alpha, blur=6)
             draw = ImageDraw.Draw(canvas)
             dot_cy = pill_y + pill_h // 2
-            draw.ellipse((name_x + name_w + 24, dot_cy - 4, name_x + name_w + 32, dot_cy + 4),
+            draw.ellipse((pill_x + 16, dot_cy - 5, pill_x + 26, dot_cy + 5),
                          fill=(*accent_rgb, 255))
-            self._draw_text(draw, (name_x + name_w + 24 + 14,
+            self._draw_text(draw, (pill_x + 34,
                                    pill_y + (pill_h - self._line_height(pill_font)) // 2),
-                            d["platform_text"], 17, theme.text_secondary, bold=True)
-            if d["author_desc"]:
-                self._draw_text(draw, (name_x, y + 68 - 26), d["author_desc"], _L.F_SIGN,
-                                theme.text_tertiary)
-            if d["ts"]:
-                ts_font = self._font(_L.F_TIME)
-                ts_w = self._text_width(d["ts"], ts_font)
-                self._draw_text(draw, (self.width - pad - ts_w, y + 12), d["ts"], _L.F_TIME,
-                                theme.text_tertiary)
-            y += 68 + 20
+                            d["platform_text"], 18, theme.text_secondary, bold=True)
 
-        for line in title_lines:
-            self._draw_text(draw, (pad, y), line, 34, theme.text_primary, bold=True)
-            y += 48
+            name_x = pad + AV + 18
+            name_max = pill_x - 20 - name_x
+            name_font = self._font(26, bold=True)
+            name = self._fit_lines(d["name"], name_font, name_max, 1)[0]
+            sub = "  ·  ".join(p for p in (d["ts"], d["author_desc"]) if p)
+            if sub:
+                sub = self._fit_lines(sub, self._font(_L.F_SIGN), name_max, 1)[0]
+                self._draw_text(draw, (name_x, y + 3), name, 26, theme.text_primary, bold=True)
+                self._draw_text(draw, (name_x, y + 40), sub, _L.F_SIGN, theme.text_tertiary)
+            else:
+                self._draw_text(draw, (name_x, y + (AV - self._line_height(name_font)) // 2),
+                                name, 26, theme.text_primary, bold=True)
+            y += AV + 22
+
+        # ---- 标题 / 正文 ----
         if title_lines:
-            y += 12
-        for line in desc_lines:
-            self._draw_text(draw, (pad, y), line, _L.F_DESC, theme.text_secondary)
-            y += _L.F_DESC_LINE_H
+            y = self._draw_rich(draw, pad, y, title_lines, TITLE_SIZE, TITLE_LH,
+                                theme.text_primary, tag_rgb, bold=True) + 6
         if desc_lines:
-            y += 16
+            y = self._draw_rich(draw, pad, y, desc_lines, _L.F_DESC, _L.F_DESC_LINE_H,
+                                theme.text_secondary, tag_rgb)
+        if title_lines or desc_lines:
+            y += 12
 
-        # 媒体内嵌圆角块（类型 chip 浮在媒体角上）
+        # ---- 媒体内嵌圆角块（类型 / 时长角标浮在媒体上）----
         if d["hero"]:
+            self._soft_shadow(canvas, pad, y, inner_w, media_h, MEDIA_RADIUS)
             try:
                 img = self._cover_fit(self._open_image(d["hero"]), inner_w, media_h)
-                img = self._rounded_image(img, 20)
+                img = self._rounded_image(img, MEDIA_RADIUS)
                 canvas.alpha_composite(img, (pad, y))
             except Exception:
-                ph = self._fallback_cover(inner_w, media_h, theme, accent_rgb, 20)
+                ph = self._fallback_cover(inner_w, media_h, theme, accent_rgb, MEDIA_RADIUS)
                 canvas.alpha_composite(ph, (pad, y))
+            edge = Image.new("RGBA", (inner_w, media_h), (0, 0, 0, 0))
+            ImageDraw.Draw(edge).rounded_rectangle(
+                (0, 0, inner_w - 1, media_h - 1), radius=MEDIA_RADIUS,
+                outline=_with_alpha(theme.border, 26), width=1,
+            )
+            canvas.alpha_composite(edge, (pad, y))
+
             chip_font = self._font(18, bold=True)
-            chip_w = self._text_width(d["content_type"], chip_font) + 28
+            chip_w = self._text_width(d["content_type"], chip_font) + 36
             self._draw_hero_badge(canvas, pad + 14, y + 14, 34, chip_w,
                                   text=d["content_type"], accent_rgb=accent_rgb, dot=False,
                                   font_size=18)
+            if clock:
+                clock_w = self._text_width(clock, chip_font) + 36
+                self._draw_hero_badge(canvas, pad + inner_w - 14 - clock_w,
+                                      y + media_h - 14 - 34, 34, clock_w,
+                                      text=clock, accent_rgb=accent_rgb, dot=False,
+                                      font_size=18)
             if d["is_video_hero"] and self.show_play_button:
                 r_ = _L.PLAY_R
                 cx, cy = self.width // 2, y + media_h // 2
@@ -2386,14 +2620,14 @@ class ShareCardRenderer:
                     [(cx - 12, cy - 18), (cx - 12, cy + 18), (cx + 20, cy)],
                     fill=(255, 255, 255, 245),
                 )
-            y += media_h + 20
+            y += media_h + 22
             draw = ImageDraw.Draw(canvas)
 
         if stat_rows:
-            y = self._draw_stat_rows(canvas, theme, stat_rows, pad, y) + 18
+            y = self._draw_stat_strip(canvas, theme, stat_rows, pad, y) + 16
             draw = ImageDraw.Draw(canvas)
         if d["online_text"]:
-            y = self._draw_online(draw, d, y, accent)
+            y = self._draw_online(draw, d, y, accent) + 8
         if d["warnings"]:
             y = self._draw_warning_block(canvas, draw, theme, d["warnings"], y, inner_w)
             draw = ImageDraw.Draw(canvas)

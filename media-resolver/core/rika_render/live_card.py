@@ -39,7 +39,7 @@ from .render import (
     ImageDraw,
 )
 
-LIVE_STYLE_VERSION = "live-2"
+LIVE_STYLE_VERSION = "live-3"
 
 # live_status -> (徽章文字, 徽章颜色)
 _STATUS = {
@@ -243,8 +243,6 @@ class LiveCardRenderer(ShareCardRenderer):
         # ---- 高度 ----
         y = 28 + _L.HEAD_PILL_H + 26
         y += media_block_h
-        if keyframe is not None:
-            y += 12 + 26
         y += 26
         if meta_text:
             y += 34
@@ -269,18 +267,20 @@ class LiveCardRenderer(ShareCardRenderer):
         y += _L.HEAD_PILL_H + 26
 
         # 封面 + 实时画面
+        # 有实时画面时，两张图各带一个角标说明（实时画面带状态色圆点）
+        chip_font = self._font(17, bold=True)
         for path, (sx, sy, sw, sh) in zip(medias, slots):
             self._media(canvas, theme, accent_rgb, path, sx, y + sy, sw, sh)
+            if keyframe is None:
+                continue
+            is_key = path is keyframe
+            chip = "实时画面" if is_key else "封面"
+            chip_w = 18 + (20 if is_key else 0) + self._text_width(chip, chip_font) + 18
+            self._draw_hero_badge(canvas, sx + 12, y + sy + 12, 32, chip_w, text=chip,
+                                  accent_rgb=_hex_to_rgb(status_color), dot=is_key,
+                                  font_size=17)
         y += media_block_h
         draw = ImageDraw.Draw(canvas)
-        if keyframe is not None:
-            cap_font = self._font(18)
-            cap = "实时画面"
-            kx, _, kw, _ = slots[-1]
-            cx = kx + kw // 2 if side else self.width // 2
-            self._draw_text(draw, (cx - self._text_width(cap, cap_font) // 2, y + 12),
-                            cap, 18, theme.text_tertiary)
-            y += 12 + 26
         y += 26
 
         if meta_text:
